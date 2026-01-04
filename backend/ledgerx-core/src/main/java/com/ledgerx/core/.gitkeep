@@ -1,0 +1,4 @@
+# LedgerX Core - Pure Domain Abstractions
+# This module contains domain models, value objects, and enums
+# No external dependencies - pure Java
+

@@ -1,0 +1,33 @@
+scenario:
+  name: delayed_settlement
+
+  hypotheses:
+    - event_delayed
+    - event_failed
+
+  timeline:
+    - at_minutes: 0
+      evidence:
+        type: EVENT
+        source: processor
+        credibility: 0.9
+        attributes:
+          name: authorization
+
+    - at_minutes: 30
+      evidence:
+        type: EVENT
+        source: processor
+        credibility: 0.9
+        attributes:
+          name: capture
+
+    # No settlement yet → absence should trigger later
+
+    - at_minutes: 180
+      evidence:
+        type: EVENT
+        source: processor
+        credibility: 0.95
+        attributes:
+          name: settlement

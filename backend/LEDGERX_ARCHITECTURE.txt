@@ -1,0 +1,538 @@
+================================================================================
+                    LEDGERX FINANCIAL TRUTH & RECONCILIATION ENGINE
+                           Architecture & Mental Model
+================================================================================
+
+OVERVIEW
+--------
+LedgerX is a Bayesian inference engine for financial transaction reconciliation.
+It processes evidence from multiple sources (gateway, bank, ledger, ops) and
+maintains probabilistic beliefs about transaction states, making risk-aware
+decisions based on evidence, absence signals, and loss models.
+
+================================================================================
+                            CORE PRINCIPLES
+================================================================================
+
+1. EVIDENCE-FIRST DESIGN
+   - Everything starts with evidence ingestion
+   - Evidence is append-only, immutable
+   - No updates, no deletes - only new evidence can arrive
+
+2. PROBABILISTIC BELIEF STATE
+   - System maintains probabilities over hypotheses (e.g., "event_delayed", "event_failed")
+   - Probabilities must always sum to 1.0
+   - Probabilities must stay in [0, 1] range
+   - Uses multiplicative updates (not additive) to preserve invariants
+
+3. TIME-AWARE INFERENCE
+   - System reacts to TWO types of signals:
+     a) New evidence arrives (event-driven)
+     b) Time advances without expected evidence (time-driven)
+   - Absence of evidence past SLA is itself evidence of risk
+
+4. RISK-DOMINANT DECISION MAKING
+   - Decisions consider:
+     * Belief probabilities
+     * Expected loss (financial, regulatory, reputational)
+     * Irreversible loss flags
+     * Risk signals (absence triggers)
+   - Escalation requires risk signals, not just uncertainty
+
+================================================================================
+                            ARCHITECTURE LAYERS
+================================================================================
+
+LAYER 1: CORE DOMAIN (ledgerx-core)
+------------------------------------
+Defines immutable abstractions:
+
+- Evidence (interface)
+  * Atomic unit of information
+  * Has: id, type, source, credibility, observedAt, attributes
+  * Sources: GATEWAY, BANK, LEDGER, OPS, TIME
+
+- Hypothesis (interface)
+  * Possible states of the world
+  * Examples: "event_delayed", "event_failed"
+  * Has: id, description, tags
+
+- BeliefState
+  * Snapshot of probabilities at a point in time
+  * Map<Hypothesis, Double> probabilities
+  * Instant asOf (when this state was computed)
+
+- Action
+  * Possible decisions the system can take
+  * Examples: "WAIT", "ESCALATE"
+
+- Decision
+  * Outcome of decision engine
+  * Contains: action, beliefState, expectedLoss, justification, decidedAt
+
+- Loss
+  * Financial impact model
+  * Components: financial, regulatory, reputational, irreversible flag
+
+
+LAYER 2: INFERENCE ENGINE (ledgerx-engine/inference)
+------------------------------------------------------
+Processes evidence and updates beliefs:
+
+DefaultInferenceEngine
+  - Updates BeliefState based on:
+    1. Time decay (older evidence loses weight)
+    2. New evidence (strengthens/weakens hypotheses)
+    3. Absence of expected evidence (risk signal)
+
+  Flow:
+    update(currentBelief, newEvidence, allObservedEvidence)
+      ↓
+    1. Apply time decay to all probabilities
+      - Uses DecayPolicy (e.g., LinearDecayPolicy)
+      - Older beliefs gradually return to priors
+      ↓
+    2. Apply evidence rules
+      - For each new evidence:
+        * Find matching EvidenceRule (by type + attributes)
+        * Apply multiplicative weights: P(h) = P(h) * weight^credibility
+        * Example: settlement event → event_failed *= 0.1, event_delayed *= 1.2
+      ↓
+    3. Apply absence rules
+      - AbsenceDetector checks if expected evidence is missing past SLA
+      - If absent: apply absence weights (stronger than evidence weights)
+      - Example: settlement absent 90min → event_failed *= 4.0, event_delayed *= 0.4
+      ↓
+    4. Normalize probabilities
+      - Ensure sum = 1.0
+      - Handle edge cases (NaN, Infinity, negatives)
+
+
+EvidenceRule
+  - Maps evidence type → hypothesis weight multipliers
+  - Can match on evidence type + attributes (e.g., "name=settlement")
+  - Weights are multiplicative:
+    * weight > 1.0 → strengthens belief
+    * weight < 1.0 → weakens belief
+    * Applied as: P(h) = P(h) * weight^credibility
+
+AbsenceRule
+  - Defines: expectedEvidenceType, expectedAttributes, after (Duration), hypothesisWeights
+  - Triggers when:
+    * Expected evidence type is NOT seen in allObservedEvidence
+    * Time elapsed >= "after" duration
+    * Attribute matching (if specified)
+  - Weights are stronger than evidence weights (risk-dominant)
+    * Example: event_failed *= 4.0 (vs 1.5 for evidence)
+
+AbsenceDetector
+  - Detects when absence rules should trigger
+  - Calculates elapsed time from earliest evidence (scenario start)
+  - Checks attribute matching for specific evidence types
+
+
+LAYER 3: DECISION ENGINE (ledgerx-engine/decision)
+---------------------------------------------------
+Makes risk-aware decisions:
+
+DefaultDecisionEngine
+  - Evaluates ActionPolicies in order
+  - Each policy can require:
+    * Probability thresholds (e.g., event_failed > 0.25)
+    * Loss thresholds
+    * Absence trigger (requiresAbsence flag)
+
+  Flow:
+    decide(beliefState, absenceTriggered)
+      ↓
+    1. Calculate expected loss for each hypothesis
+      - Uses LossEvaluator
+      - Considers: financial, regulatory, reputational, irreversible
+      ↓
+    2. Evaluate policies in order
+      - Check probability match
+      - Check loss match
+      - Check absence requirement (if requiresAbsence=true)
+      - First matching policy wins
+      ↓
+    3. Return Decision or fallback to WAIT
+
+ActionPolicy
+  - Defines when an action should be taken
+  - Fields:
+    * actionId: "WAIT", "ESCALATE", etc.
+    * whenProbabilityExceeds: Map<hypothesisId, threshold>
+    * whenExpectedLossExceeds: Double
+    * requiresAbsence: Boolean (guards escalation behind risk signals)
+
+LossEvaluator
+  - Computes expected loss from belief state
+  - Formula: Σ P(h) * Loss(h)
+  - Considers horizon (time window for loss calculation)
+
+
+LAYER 4: SIMULATOR (ledgerx-simulator)
+----------------------------------------
+Tests the system with scenarios:
+
+SimulationApp
+  - Sets up:
+    * Hypotheses registry
+    * Evidence rules (general + settlement-specific)
+    * Absence rules
+    * Inference engine
+    * Decision engine with policies
+  - Loads scenario from YAML
+  - Runs simulation
+
+SimulationRunner
+  - Orchestrates timeline:
+    1. Load scenario events
+    2. Plan time ticks (from absence rules)
+    3. Merge events + ticks into schedule
+    4. For each time point:
+       * Update belief state
+       * Check if absence triggered
+       * Make decision
+       * Output state
+
+TimeTickPlanner
+  - Plans when TIME evidence should be injected
+  - Based on absence rule "after" durations
+  - Ensures absence logic is evaluated even without new evidence
+
+EvidenceFactory
+  - Creates Evidence from scenario specifications
+  - Handles type, source, credibility, attributes mapping
+
+================================================================================
+                            KEY CONCEPTS EXPLAINED
+================================================================================
+
+1. MULTIPLICATIVE UPDATES (Why Not Additive?)
+---------------------------------------------
+Problem with additive:
+  P(h) = P(h) + delta
+  → Can go negative
+  → Can exceed 1.0
+  → Sum can exceed 1.0
+
+Solution: Multiplicative
+  P(h) = P(h) * weight
+  → Always preserves 0 <= P(h) <= 1 (if starting valid)
+  → Normalization ensures sum = 1.0
+  → Mathematically sound for Bayesian updates
+
+Example:
+  Prior: P(delayed) = 0.5, P(failed) = 0.5
+  Evidence arrives with weight: delayed *= 1.6, failed *= 0.6
+  After: P(delayed) = 0.8, P(failed) = 0.3
+  Normalize: P(delayed) = 0.73, P(failed) = 0.27 (sum = 1.0)
+
+
+2. ABSENCE AS EVIDENCE (Why It Matters)
+----------------------------------------
+In finance, silence past SLA is a strong signal:
+  - Expected settlement at t=90min
+  - No settlement by t=90min
+  - This absence is evidence of failure risk
+
+Absence rules:
+  - Trigger when expected evidence is missing past threshold
+  - Apply STRONGER weights than regular evidence
+  - Example: event_failed *= 4.0 (vs 1.5 for regular evidence)
+
+Why stronger?
+  - Absence is deterministic (SLA violation)
+  - Regular evidence is noisy (could be delayed)
+  - Risk systems must act on absence, not wait
+
+
+3. DECISION GUARDS (Why Escalation Needs Absence)
+--------------------------------------------------
+Problem: System might escalate too early
+  - At t=0, uncertainty alone could trigger escalation
+  - But there's no risk signal yet (no SLA violation)
+
+Solution: requiresAbsence flag
+  - Escalation policy: requiresAbsence = true
+  - System only escalates when:
+    * Probability threshold met (e.g., event_failed > 0.25)
+    * AND absence has triggered (risk signal present)
+
+This ensures:
+  - No premature escalation (t=0, t=30)
+  - Escalation only when risk is credible (t=90+)
+
+
+4. SETTLEMENT AS TERMINAL EVIDENCE (Why Strong Suppression)
+------------------------------------------------------------
+Settlement is terminal evidence:
+  - If settlement arrives, failure is extremely unlikely
+  - System should strongly suppress failure probability
+
+Settlement rule:
+  - event_failed *= 0.1 (strong suppression)
+  - event_delayed *= 1.2 (confirms it was just delayed)
+
+This enables:
+  - Natural de-escalation when settlement arrives
+  - System "releases" the transaction
+  - Belief converges to "delayed" not "failed"
+
+
+5. TIME TICKS (Why Continuous Evaluation)
+------------------------------------------
+Problem: System only updates when new evidence arrives
+  - At t=90, absence should trigger
+  - But no new evidence → no update → no absence check
+
+Solution: TimeTickEvidence
+  - Injected at planned intervals (from absence rules)
+  - Triggers inference engine update
+  - Enables absence detection even in silence
+
+Flow:
+  AbsenceRule: after = 90 minutes
+  → TimeTickPlanner: plan tick at t=90
+  → SimulationRunner: inject TimeTickEvidence at t=90
+  → InferenceEngine: update belief, check absence
+  → AbsenceDetector: detects absence, triggers rule
+  → Belief updated, decision changes
+
+
+6. NORMALIZATION (Why It's Critical)
+--------------------------------------
+After multiplicative updates, probabilities might not sum to 1.0:
+  P(delayed) = 0.8, P(failed) = 0.3 → sum = 1.1
+
+Normalization:
+  sum = Σ P(h)
+  P(h) = P(h) / sum
+
+This ensures:
+  - Probabilities always sum to 1.0
+  - Valid probability distribution
+  - System remains mathematically sound
+
+Edge cases handled:
+  - If sum = 0 → uniform distribution
+  - NaN/Infinity → clamped to 0.0
+  - Negative values → clamped to 0.0
+
+================================================================================
+                            SIMULATION FLOW EXAMPLE
+================================================================================
+
+Scenario: Delayed Settlement
+  - Authorization at t=0
+  - Capture at t=30
+  - Settlement expected by t=90 (SLA)
+  - Settlement arrives at t=180
+
+Timeline Execution:
+
+t=0 min: Authorization arrives
+  Evidence: EVENT {name=authorization}
+  Belief update:
+    - Apply time decay (none yet)
+    - Apply evidence rule: delayed *= 1.6, failed *= 0.6
+    - No absence yet (90min not reached)
+  Belief: P(delayed) ≈ 0.71, P(failed) ≈ 0.29
+  Decision: WAIT (absence not triggered, probability < 0.25 or requiresAbsence=true)
+
+t=30 min: Capture arrives
+  Evidence: EVENT {name=capture}
+  Belief update:
+    - Apply time decay (30min elapsed)
+    - Apply evidence rule: delayed *= 1.6, failed *= 0.6
+    - No absence yet
+  Belief: P(delayed) ≈ 0.85, P(failed) ≈ 0.15
+  Decision: WAIT
+
+t=90 min: Time tick (absence check)
+  Evidence: TIME {reason=absence_check}
+  Belief update:
+    - Apply time decay (90min elapsed)
+    - No new regular evidence
+    - AbsenceDetector: settlement NOT seen, 90min elapsed → TRIGGER
+    - Apply absence rule: failed *= 4.0, delayed *= 0.4
+  Belief: P(delayed) ≈ 0.37, P(failed) ≈ 0.63
+  Decision: ESCALATE (absence triggered, failed > 0.25)
+
+t=180 min: Settlement arrives
+  Evidence: EVENT {name=settlement}
+  Belief update:
+    - Apply time decay (180min elapsed)
+    - Apply settlement rule: failed *= 0.1, delayed *= 1.2
+    - AbsenceDetector: settlement SEEN → no absence trigger
+  Belief: P(delayed) ≈ 0.94, P(failed) ≈ 0.06
+  Decision: WAIT (failure probability dropped, no risk signal)
+
+================================================================================
+                            CONFIGURATION EXAMPLE
+================================================================================
+
+Evidence Rules:
+  General events:
+    type: EVENT
+    weights: {event_delayed: 1.6, event_failed: 0.6}
+  
+  Settlement (terminal):
+    type: EVENT
+    attributes: {name: settlement}
+    weights: {event_failed: 0.1, event_delayed: 1.2}
+
+Absence Rules:
+  Settlement missing:
+    expectedType: EVENT
+    expectedAttributes: {name: settlement}
+    after: 90 minutes
+    weights: {event_failed: 4.0, event_delayed: 0.4}
+
+Action Policies:
+  Escalate:
+    actionId: ESCALATE
+    whenProbabilityExceeds: {event_failed: 0.25}
+    requiresAbsence: true  ← KEY: guards behind risk signal
+  
+  Wait (fallback):
+    actionId: WAIT
+    (always matches)
+
+Loss Model:
+  event_failed: Loss(1000, 0, 0, irreversible=true)
+  event_delayed: Loss(10, 0, 0, irreversible=false)
+
+================================================================================
+                            WHY THESE DESIGN CHOICES
+================================================================================
+
+1. Why Multiplicative Updates?
+   - Preserves probability invariants
+   - Mathematically sound Bayesian reasoning
+   - No need for complex clamping logic
+
+2. Why Absence Rules Separate?
+   - Absence is conceptually different from evidence
+   - Requires time-based evaluation
+   - Needs stronger weights (risk-dominant)
+
+3. Why requiresAbsence Flag?
+   - Prevents premature escalation
+   - Ensures decisions are risk-signal driven
+   - Matches real ops behavior (don't escalate on uncertainty alone)
+
+4. Why Settlement-Specific Rule?
+   - Terminal evidence needs special handling
+   - Strong suppression enables natural de-escalation
+   - Encodes domain knowledge (settlement = resolution)
+
+5. Why Time Ticks?
+   - Enables continuous belief evolution
+   - Absence detection requires time awareness
+   - System reacts to silence, not just events
+
+6. Why Normalization?
+   - Ensures valid probability distribution
+   - Required for mathematical correctness
+   - Handles edge cases gracefully
+
+================================================================================
+                            EXTENSIBILITY POINTS
+================================================================================
+
+1. New Evidence Types
+   - Add to EvidenceType enum
+   - Create EvidenceRule with appropriate weights
+   - System automatically processes
+
+2. New Hypotheses
+   - Add to hypothesis registry
+   - Update evidence/absence rules to reference
+   - System maintains probabilities
+
+3. New Actions
+   - Add to ActionRegistry
+   - Create ActionPolicy with conditions
+   - Decision engine evaluates
+
+4. Custom Decay Policies
+   - Implement DecayPolicy interface
+   - Use in DefaultInferenceEngine
+   - System applies automatically
+
+5. Custom Loss Models
+   - Implement LossModel interface
+   - Use in LossEvaluator
+   - Decision engine considers in policies
+
+================================================================================
+                            KEY INVARIANTS
+================================================================================
+
+1. Probability Invariants
+   - ∀h: 0 <= P(h) <= 1
+   - Σ P(h) = 1.0
+   - Enforced by normalization
+
+2. Evidence Immutability
+   - Evidence is append-only
+   - No updates, no deletes
+   - Historical record preserved
+
+3. Time Monotonicity
+   - BeliefState.asOf always increases
+   - Evidence.observedAt always increases
+   - System never "goes backwards"
+
+4. Decision Consistency
+   - Same belief state → same decision (deterministic)
+   - Policies evaluated in order
+   - Fallback always available (WAIT)
+
+================================================================================
+                            TESTING & VALIDATION
+================================================================================
+
+The simulator validates:
+1. Probability invariants (no negatives, sum = 1.0)
+2. Absence triggering at correct times
+3. Decision changes at appropriate moments
+4. De-escalation when resolution arrives
+5. No premature escalation
+
+Expected behavior:
+- t=0: WAIT (no risk signal)
+- t=30: WAIT (no risk signal)
+- t=90: ESCALATE (absence triggered, risk present)
+- t=180: WAIT (settlement arrived, risk resolved)
+
+================================================================================
+                            FUTURE ENHANCEMENTS
+================================================================================
+
+1. Conflicting Evidence Handling
+   - Stripe says success, Ledger says failed
+   - Source credibility weighting
+   - Contradiction detection
+
+2. Multi-Source Correlation
+   - Cross-reference evidence from multiple sources
+   - Detect anomalies
+   - Confidence scoring
+
+3. Adaptive Thresholds
+   - Learn from historical decisions
+   - Adjust escalation thresholds
+   - Risk appetite calibration
+
+4. Audit Trail
+   - Complete decision history
+   - Evidence lineage
+   - Regulatory compliance
+
+================================================================================
+                            END OF DOCUMENTATION
+================================================================================
+
