@@ -1,0 +1,8 @@
+hypotheses:
+  - id: event_delayed
+    description: Expected event has not arrived yet
+    prior: 0.7
+
+  - id: event_failed
+    description: Event will never arrive
+    prior: 0.3

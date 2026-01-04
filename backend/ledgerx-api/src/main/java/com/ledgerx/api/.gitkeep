@@ -1,0 +1,4 @@
+# LedgerX API - Spring Boot REST API
+# This module contains controllers, services, and Spring Boot application
+# Depends on: all other modules
+

@@ -1,0 +1,4 @@
+# LedgerX Config - YAML-driven Intelligence
+# This module contains configuration files and rule definitions
+# Depends on: ledgerx-core
+
