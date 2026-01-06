@@ -7,7 +7,6 @@ LedgerX is a failure-first platform that determines the **true financial state o
 > It explains **what actually happened to money** when systems disagree.
 > POC(Refund Retry)
 
----
 
 ## 🚨 The Problem
 
