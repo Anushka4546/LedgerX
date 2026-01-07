@@ -225,3 +225,5 @@ LedgerX is about **trust**, not throughput.
 > They fail because no one can explain what happened.
 
 LedgerX exists to fix that.
+
+Notion link: https://www.notion.so/LedgerX-Business-Domain-Notes-Refund-Decision-System-2dc11220332980e280b0cbb68eb54206?source=copy_link
