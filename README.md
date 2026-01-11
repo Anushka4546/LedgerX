@@ -1,5 +1,5 @@
 # LedgerX  
-**Financial Truth & Reconciliation Engine for Distributed Payment Systems**
+**Financial Truth & Reconciliation Engine for Distributed Payment System**
 
 LedgerX is a failure-first platform that determines the **true financial state of transactions** across systems that cannot be transactionally coordinated like payment gateways, banks, and internal ledgers.
 
@@ -18,7 +18,7 @@ In real fintech systems, money flows through **multiple independent systems**:
 - Human operations (manual overrides, support actions)
 
 These systems:
-- Fail independently  
+- Fail separately  
 - Report conflicting states  
 - Cannot be rolled back together  
 
